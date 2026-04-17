@@ -74,36 +74,49 @@ final project/
 - Node.js >= 18
 - [Circom](https://docs.circom.io/getting-started/installation/) (for ZKP circuit compilation)
 
-### Install & Test
+### Step 1: Clone & Install Dependencies
 
 ```bash
-cd "final project"
+git clone git@github.com:wodex1nhaoIeng/cmu-15621-final-project.git
+cd cmu-15621-final-project
 npm install
+```
 
+### Step 2: Build ZKP Circuit
+
+The ZKP version requires Circom to compile the circuit. Install it first:
+
+```bash
+# Install Circom compiler (requires Rust)
+cargo install --git https://github.com/iden3/circom.git --tag v2.2.3
+```
+
+Then build the circuit (compiles circuit, performs Groth16 trusted setup, generates Solidity verifier):
+
+```bash
+bash scripts/buildCircuit.sh
+```
+
+> **Note:** V1 and V2 tests work without this step. Only V3 (ZKP) requires it.
+
+### Step 3: Run Tests
+
+```bash
 # Run all 47 tests
 npx hardhat test
 
 # Run specific version
-npx hardhat test test/VickreyAuction.js       # V1 only
-npx hardhat test test/VickreyAuctionECIES.js   # V2 only
-npx hardhat test test/VickreyAuctionZKP.js     # V3 only
+npx hardhat test test/VickreyAuction.js       # V1: 25 tests
+npx hardhat test test/VickreyAuctionECIES.js   # V2: 17 tests
+npx hardhat test test/VickreyAuctionZKP.js     # V3: 5 tests (requires Step 2)
 ```
 
-### Run Demos
+### Step 4: Run Demos
 
 ```bash
-npx hardhat run scripts/demo.js         # V1: basic auction
-npx hardhat run scripts/demoECIES.js    # V2: encrypted auction
+npx hardhat run scripts/demo.js         # V1: basic auction demo
+npx hardhat run scripts/demoECIES.js    # V2: encrypted auction demo
 ```
-
-### Build ZKP Circuit (if needed)
-
-```bash
-# Install circom: cargo install --git https://github.com/iden3/circom.git
-bash scripts/buildCircuit.sh
-```
-
-This compiles the Circom circuit, performs a Groth16 trusted setup, and generates the Solidity verifier contract.
 
 ## Technologies
 
