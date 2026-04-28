@@ -1,6 +1,9 @@
 const { expect } = require("chai");
 const {
-  elemEq, elemAdd, randomScalar, commit, modQ
+  elemEq, elemAdd, randomScalar, commit, G,
+  elem2Hex,
+  hex2Elem,
+  elemScalarMul
 } = require("../../src/zk-proof/pedersen");
 
 describe("Pedersen Commitment", function () {
@@ -19,5 +22,15 @@ describe("Pedersen Commitment", function () {
 
     expect(elemEq(lhs, rhs)).to.be.true;
     expect(elemEq(lhs, rhs2)).to.be.false;
-  })
+  });
+
+  it("Conversion between group elements and hex strings", function () {
+    const x = elemScalarMul(G, randomScalar());
+    const y = elemAdd(G, x);
+    const h = elem2Hex(x);
+    console.log(`h: 0x${h.substring(0, 16)}...`);
+
+    expect(elemEq(x, hex2Elem(h))).to.be.true;
+    expect(elemEq(y, hex2Elem(h))).to.be.false;
+  });
 })

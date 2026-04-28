@@ -65,6 +65,19 @@ function elemEq(A, B) {
 }
 
 /**
+ * Convert a group element to a hex string.
+ * @param {*} A 
+ * @returns {string}
+ */
+function elem2Hex(A) {
+  return A.toHex();
+}
+
+function hex2Elem(hexString) {
+  return Point.fromHex(hexString);
+}
+
+/**
  * Compute hash value in the group of a list of items
  */
 function hashToScalar(...items) {
@@ -100,4 +113,6 @@ module.exports = {
   elemSub,
   elemScalarMul,
   elemEq,
+  elem2Hex,
+  hex2Elem
 };

@@ -1,95 +1,204 @@
-/**
- * Interactive demo: runs a complete auction on the local Hardhat network.
- *
- * Usage:
- *   npx hardhat run scripts/demo.js
- */
 const { ethers } = require("hardhat");
+const {
+  elemEq, elemAdd, randomScalar, commit, G,
+  elem2Hex,
+  hex2Elem,
+  elemScalarMul
+} = require("../src/zk-proof/pedersen");
+const { proveMaximum, verifyMaximum } = require("../src/zk-proof/proofMaximum");
+const { proveMembership, verifyMembership } = require("../src/zk-proof/proofMembership");
+
+const EventEmitter = require('events');
+const offchainBus = new EventEmitter();
+
+async function mineBlock(seconds = 5) {
+  await ethers.provider.send("evm_increaseTime", [seconds]);
+  await ethers.provider.send("evm_mine");
+}
+
+async function waitUntilCommitDue(auction, name) {
+  while (!(await auction.commitDue())) {
+    console.log(`${name}: deadline not due yet; waiting...`);
+    await mineBlock(10);
+  }
+
+  console.log(`${name}: deadline is due;`);
+}
+
+async function waitForAllReveals(num) {
+  if (num <= 0) {
+    return [];
+  }
+
+  return new Promise((resolve) => {
+    const reveals = [];
+
+    function handler(reveal) {
+      reveals.push(reveal);
+      if (reveals.length === num) {
+        offchainBus.off("seller:reveal", handler);
+        resolve(reveals);
+      }
+    }
+
+    offchainBus.on("seller:reveal", handler);
+  });
+}
+
+function waitForSellerMessage(bidder, name) {
+  return new Promise((resolve) => {
+    offchainBus.once(`message:${bidder.address}`, (message) => {
+      console.log(`${name}: received private seller message`);
+      resolve(message);
+    });
+  });
+}
+
+async function waitForAuctionFinalized(auction) {
+  return new Promise((resolve) => {
+    auction.once("AuctionFinalized", (winnerAddress) => {
+      resolve(winnerAddress);
+    });
+  });
+}
+
+function sendRevealToSeller(reveal) {
+  offchainBus.emit("seller:reveal", reveal);
+}
+
+async function sellerSendMessageToWinner(winnerAddress, message) {
+  offchainBus.emit(`message:${winnerAddress}`, message);
+}
+
+async function bidderFlow(auction, bidder, name, bidAmount) {
+  const nonce = randomScalar();
+  const commitment = commit(bidAmount, nonce);
+
+  await auction.connect(bidder).commitBid(elem2Hex(commitment));
+  console.log(`${name}: committed`);
+
+  await waitUntilCommitDue(auction, name);
+
+  sendRevealToSeller({
+    address: bidder.address,
+    bidAmount,
+    nonce,
+  });
+
+  console.log(`${name}: waiting for AuctionFinalized...`);
+
+  const winnerAddress = await waitForAuctionFinalized(auction);
+
+  if (winnerAddress === bidder.address) {
+    console.log(`${name}: I won`);
+
+    const { maximumProof, secondMaxProof, secondHighestBid } = await waitForSellerMessage(bidder, name);
+    const bidders = [];
+    const commits = [];
+    let myIndex = -1;
+    for (let i = 0; i < await auction.biddersLength(); ++i) {
+      const auctionBidder = await auction.bidders(i);
+      bidders.push(auctionBidder);
+      commits.push(hex2Elem(await auction.commits(auctionBidder)));
+      if (auctionBidder === bidder.address) {
+        myIndex = i;
+      }
+    }
+    if (!verifyMaximum(commits, maximumProof, 32, auction.address)) {
+      throw new Error("Winner cannot verify that their bid is the maximum bid");
+    }
+    if (!verifyMembership(
+      secondHighestBid,
+      commits.toSpliced(myIndex, 1),
+      maximumProof,
+      auction.address)
+    ) {
+      throw new Error("Winner cannot verify the second highest bid");
+    }
+    console.log(`${name}: Proofs verified`);
+
+  } else {
+    console.log(`${name}: I lost`);
+  }
+}
+
+async function sellerFlow(auction, seller, numbidder) {
+  const reveals = await waitForAllReveals(numbidder);
+  const revealMap = new Map();
+
+  let winner = reveals[0];
+
+  for (const reveal of reveals) {
+    if (reveal.bidAmount > winner.bidAmount) {
+      winner = reveal;
+    }
+    revealMap.set(reveal.address, reveal);
+  }
+  console.log("Winner selected:", winner.address);
+
+  await auction.connect(seller).finalize(winner.address);
+
+  const bidders = [];
+  const commits = [];
+  const xs = [];
+  const rs = [];
+  let winnerIndex = -1;
+  for (let i = 0; i < await auction.biddersLength(); ++i) {
+    const bidder = await auction.bidders(i);
+    bidders.push(bidder);
+    commits.push(hex2Elem(await auction.commits(bidder)));
+    if (bidder === winner.address) {
+      winnerIndex = i;
+    }
+    xs.push(revealMap.get(bidder).bidAmount);
+    rs.push(revealMap.get(bidder).nonce);
+  }
+
+  let secondHighestIndex = 0;
+  for (let i = 1; i < bidders.length; ++i) {
+    if (i === winnerIndex) {
+      continue;
+    }
+    if (xs[i] > xs[secondHighestIndex]) {
+      secondHighestIndex = i;
+    }
+  }
+
+  const maximumProof = proveMaximum(
+    xs, rs, commits, winnerIndex, 32, auction.address
+  );
+  const secondMaxProof = proveMembership(
+    xs[secondHighestIndex],
+    rs[secondHighestIndex],
+    secondHighestIndex > winnerIndex ? secondHighestIndex - 1 : secondHighestIndex,
+    commits.toSpliced(winnerIndex, 1),
+    auction.address
+  );
+  await sellerSendMessageToWinner(winner.address, {
+    maximumProof, secondMaxProof, secondHighestBid: xs[secondHighestIndex]
+  });
+}
 
 async function main() {
-    const [seller, bidder1, bidder2, bidder3] = await ethers.getSigners();
+  const [seller, bidder1, bidder2, bidder3] = await ethers.getSigners();
 
-    console.log("=== Deploying VickreyAuction ===");
-    const VickreyAuction = await ethers.getContractFactory("VickreyAuction");
-    const reservePrice = ethers.parseEther("1");
-    const auction = await VickreyAuction.deploy(
-        "Rare Digital Art #42",
-        reservePrice,
-        3600,  // 1h commit
-        3600   // 1h reveal
-    );
-    console.log(`Auction deployed at: ${await auction.getAddress()}`);
-    console.log(`Seller: ${seller.address}`);
-    console.log(`Reserve price: 1 ETH\n`);
+  const Auction = await ethers.getContractFactory("VickreyAuction", seller);
+  const auction = await Auction.deploy("Demo Item", 60);
+  await auction.waitForDeployment();
+  const now = (await ethers.provider.getBlock("latest")).timestamp;
+  const commitDeadline = Number(await auction.commitDeadline());
+  console.log("Auction deployed:", await auction.getAddress());
+  console.log(`Commit deadline: ${commitDeadline - now} seconds later`);
 
-    // Helper
-    function computeHash(bidValue, nonce) {
-        return ethers.solidityPackedKeccak256(["uint256", "bytes32"], [bidValue, nonce]);
-    }
-
-    // Prepare bids
-    const bids = [
-        { name: "Bidder1", signer: bidder1, amount: ethers.parseEther("5"), nonce: ethers.hexlify(ethers.randomBytes(32)) },
-        { name: "Bidder2", signer: bidder2, amount: ethers.parseEther("3"), nonce: ethers.hexlify(ethers.randomBytes(32)) },
-        { name: "Bidder3", signer: bidder3, amount: ethers.parseEther("2"), nonce: ethers.hexlify(ethers.randomBytes(32)) },
-    ];
-
-    // ── COMMIT PHASE ──
-    console.log("=== Commit Phase ===");
-    for (const b of bids) {
-        const hash = computeHash(b.amount, b.nonce);
-        await auction.connect(b.signer).commitBid(hash, { value: b.amount });
-        console.log(`${b.name} committed (deposit: ${ethers.formatEther(b.amount)} ETH)`);
-    }
-    console.log(`Total bidders: ${await auction.getBiddersCount()}\n`);
-
-    // Advance time past commit deadline
-    await ethers.provider.send("evm_increaseTime", [3601]);
-    await ethers.provider.send("evm_mine");
-
-    // ── REVEAL PHASE ──
-    console.log("=== Reveal Phase ===");
-    for (const b of bids) {
-        await auction.connect(b.signer).revealBid(b.amount, b.nonce);
-        console.log(`${b.name} revealed bid: ${ethers.formatEther(b.amount)} ETH`);
-    }
-    console.log();
-
-    // Advance time past reveal deadline
-    await ethers.provider.send("evm_increaseTime", [3601]);
-    await ethers.provider.send("evm_mine");
-
-    // ── FINALIZE ──
-    console.log("=== Finalize ===");
-    await auction.finalize();
-    const winner = await auction.winner();
-    const winningBid = await auction.winningBid();
-    const secondPrice = await auction.secondPrice();
-    console.log(`Winner:       ${winner}`);
-    console.log(`Winning bid:  ${ethers.formatEther(winningBid)} ETH`);
-    console.log(`Second price: ${ethers.formatEther(secondPrice)} ETH (amount winner pays)\n`);
-
-    // ── WITHDRAWALS ──
-    console.log("=== Withdrawals ===");
-    for (const b of bids) {
-        const balBefore = await ethers.provider.getBalance(b.signer.address);
-        await auction.connect(b.signer).withdraw();
-        const balAfter = await ethers.provider.getBalance(b.signer.address);
-        const diff = balAfter - balBefore;
-        console.log(`${b.name}: balance change ≈ ${ethers.formatEther(diff)} ETH`);
-    }
-
-    const sellerBalBefore = await ethers.provider.getBalance(seller.address);
-    await auction.connect(seller).sellerWithdraw();
-    const sellerBalAfter = await ethers.provider.getBalance(seller.address);
-    console.log(`Seller:  balance change ≈ ${ethers.formatEther(sellerBalAfter - sellerBalBefore)} ETH`);
-
-    const contractBal = await ethers.provider.getBalance(await auction.getAddress());
-    console.log(`\nContract remaining balance: ${ethers.formatEther(contractBal)} ETH`);
-    console.log("\n=== Auction Complete ===");
+  await Promise.all([
+    bidderFlow(auction, bidder1, "Bidder 1", 100),
+    bidderFlow(auction, bidder2, "Bidder 2", 250),
+    bidderFlow(auction, bidder3, "Bidder 3", 175),
+    sellerFlow(auction, seller, 3)
+  ]);
 }
 
 main().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
+  console.error(error);
+  process.exitCode = 1;
 });

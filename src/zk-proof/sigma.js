@@ -81,7 +81,7 @@ function orDlogHash(Ys, As, ctx) {
 function proveOrDlog(Ys, realIndex, w, ctx = "") {
   realIndex = Number(realIndex);
   if (!Number.isInteger(realIndex) || realIndex < 0 || realIndex >= Ys.length) {
-    throw new Error("invalid realIndex");
+    throw new Error(`invalid realIndex: ${realIndex}`);
   }
 
   const k = Ys.length;
