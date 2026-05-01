@@ -1,0 +1,368 @@
+% !TEX program = pdflatex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{booktabs}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+
+\lstdefinelanguage{solidity}{
+  keywords={pragma,contract,public,private,external,internal,view,pure,returns,address,uint256,bool,string,mapping,event,modifier,constructor,require,emit,memory,calldata,if,else,for,while,return},
+  sensitive=true, comment=[l]{//}, morecomment=[s]{/*}{*/}, morestring=[b]"
+}
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!50!black},
+  stringstyle=\color{red!70!black},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  numbers=none
+}
+
+\title{\textbf{Trustless Second-Price Auctions on Blockchain}}
+
+\author{Group 7 \;|\; Deming Chen \;\&\; Jieyou Zhao\\ 15-621 Final Project}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present a sealed-bid second-price (Vickrey) auction protocol that runs on
+the Ethereum Virtual Machine and removes the need to trust the auctioneer.
+In a three-phase commit/encrypt/reveal protocol, bidders publish hash-style
+commitments to their bids on-chain, transmit the openings to the seller under
+asymmetric encryption, and the seller publishes two non-interactive
+zero-knowledge proofs: (i) the winner's commitment opens to the maximum value
+of the bid set, and (ii) the publicly announced second-price equals the
+opening of some non-winner commitment. Both proofs are constructed from
+$\Sigma$-protocols on \texttt{secp256k1} and made non-interactive via
+Fiat--Shamir, so they require no trusted setup. We discuss the economic value,
+the cryptographic construction, the smart-contract architecture, the threat
+model, and the trade-offs of our prototype.
+\end{abstract}
+
+% =====================================================================
+\section{Economic Problem and Value Proposition}
+% =====================================================================
+
+\subsection{What is a second-price auction?}
+
+A \emph{second-price sealed-bid auction} -- also known as the
+\emph{Vickrey auction} -- works as follows:
+
+\begin{itemize}[leftmargin=*,nosep]
+\item Each bidder submits a sealed (secret) bid.
+\item The seller opens all bids simultaneously.
+\item The highest bidder wins.
+\item The winner pays the \emph{second-highest} price.
+\end{itemize}
+
+The mechanism's central appeal is its \textbf{truthful-bidding} property:
+each bidder's (weakly) dominant strategy is to bid their true valuation, since
+the price they pay is decoupled from the bid they submit. This makes
+second-price auctions analytically clean and behaviourally robust.
+
+\paragraph{Worked example.} Suppose Alice bids \$100, Bob \$60, Carol \$80.
+Alice wins, but pays only \$80 -- the second-highest bid.
+
+\subsection{The trust problem}
+
+Despite its theoretical beauty, the second-price auction's incentive guarantee
+crucially relies on \emph{believing} that the seller will faithfully execute
+two steps:
+\begin{enumerate}[leftmargin=*,nosep]
+\item declare the highest bidder as the winner, and
+\item charge \emph{exactly} the second-highest bid.
+\end{enumerate}
+Neither step is verifiable from a bidder's local view. Two specific attacks
+follow immediately, and both are fatal:
+\begin{description}[leftmargin=1em,style=nextline]
+\item[Attack A: lying about the second price.]
+The seller can simply tell the winner that the second-highest bid was higher
+than it actually was, charging closer to the winner's full bid.
+\item[Attack B: fabricating a phantom bid.]
+The seller invents an extra fake bid just below the genuine winner's bid,
+extracting nearly the full surplus. In Alice/Bob/Carol's example, the seller
+can claim someone bid \$99 and charge Alice \$99 instead of \$80.
+\end{description}
+There is no way for participants -- bidders or external observers -- to detect
+either attack, because the losing bids are never disclosed to anyone but the
+seller.
+
+\subsection{Why this matters: market scale}
+
+Second-price logic is not a niche academic curiosity; close
+relatives drive a substantial fraction of the modern internet economy. The
+\emph{Generalized Second-Price (GSP)} auction, a sponsored-search variant of
+Vickrey, was the cash engine of the early-2000s search-advertising boom:
+\begin{itemize}[leftmargin=*,nosep]
+\item Google's 2005 total revenue was \$6.14\,B; over \textbf{98\%} of it came
+from GSP auctions.
+\item Yahoo!'s 2005 total revenue was \$5.26\,B, with a large share -- believed
+over half -- derived from GSP auctions.
+\item As of May 2006 the annual revenues from GSP auctions were on the order
+of \textbf{\$10\,B}.
+\end{itemize}
+Twenty years later the same mechanism family underpins ad markets at Google,
+Meta, Amazon, and TikTok, plus large-volume blockchain-native auctions such as
+Ethereum Name Service registrations, NFT auctions, and MEV-Boost block
+auctions. The trust gap therefore affects markets that move many tens of
+billions of dollars annually.
+
+\subsection{Value proposition of a blockchain-native auction}
+
+A blockchain-native second-price auction makes the two-line promise of the
+mechanism \emph{cryptographically} enforceable: any participant -- including
+third parties -- can verify that the declared winner truly bid the maximum
+value and that the price they pay is truly the second-highest. This eliminates
+the entire class of post-hoc seller manipulations described above and removes
+the need to fall back on reputation, regulation, or law for what is ultimately
+a bookkeeping question.
+
+% =====================================================================
+\section{How This Is Addressed Today (Non-Blockchain)}
+% =====================================================================
+
+The overwhelming majority of second-price-style auctions today run on
+\textbf{centralised platforms}.
+
+\paragraph{Pros of centralised platforms.}
+\begin{itemize}[leftmargin=*,nosep]
+\item Simple to implement and widely understood.
+\item Low computational overhead -- it is just a database query.
+\end{itemize}
+
+\paragraph{Cons of centralised platforms.}
+\begin{itemize}[leftmargin=*,nosep]
+\item Bidders \emph{must} trust the platform not to peek, leak, or fabricate bids.
+\item There is no way for bidders to verify the second price.
+\item The platform is a single point of failure (technical, legal, financial).
+\end{itemize}
+
+\paragraph{Representative incumbents.}
+\begin{description}[leftmargin=1em,style=nextline]
+\item[Google Ads.] Migrated from second-price to first-price in 2019, in part
+\emph{because} of trust issues with the second-price mechanism. This is direct
+market evidence that the trust gap is real and consequential: a major platform
+gave up a theoretically superior mechanism rather than convince advertisers it
+was being honest.
+\item[eBay.] Uses proxy bidding -- a hidden second-price variant. Users must
+trust eBay's internal database; the second price is never independently
+verifiable.
+\item[Christie's / Sotheby's.] Traditional auction houses where
+trustworthiness comes from reputation and regulation rather than from
+cryptographic guarantees, and high-profile incidents (chandelier bidding,
+ring-bidding scandals) periodically reveal the limits of that approach.
+\end{description}
+\noindent\textbf{Why these solutions fall short.} Every option above relies on
+trust in an intermediary. None offers a cryptographic guarantee that bids were
+not manipulated.
+
+% =====================================================================
+\section{Our Solution: A Trustless Second-Price Auction on Blockchain}
+% =====================================================================
+
+We design a smart-contract-based second-price auction where:
+\begin{itemize}[leftmargin=*,nosep]
+\item No participant can observe others' bids, even after the auction closes.
+\item The seller cannot manipulate or fabricate bids.
+\item The correctness of the result is cryptographically verifiable.
+\end{itemize}
+
+\subsection{Three-phase protocol}
+
+\begin{description}[leftmargin=1em,style=nextline]
+\item[Phase 1 -- Commit (on-chain).]
+Each bidder $i$ wishing to bid $p_i$ posts a commitment of the form
+$h(p_i \| n_i)$ on-chain, where $n_i$ is a random nonce. In our implementation
+$h$ is instantiated by a Pedersen commitment $c_i = p_i\cdot G + n_i\cdot H$
+on \texttt{secp256k1}, which is perfectly hiding (so $p_i$ is information-theoretically secret)
+and computationally binding under the discrete-logarithm assumption.
+
+\item[Phase 2 -- Reveal to seller (encrypted).]
+Bidders encrypt the opening $(p_i, n_i)$ under the seller's public key and
+send it to the seller.
+
+\textbf{Design choice: the reveal channel is intentionally left out of the
+protocol.} The contract only enforces the on-chain commitment in Phase 1 and
+the winner declaration in Phase 3; it deliberately does not prescribe how the
+opening reaches the seller. Participants are free to pick whatever channel
+fits their threat model -- direct ECIES posted on-chain for public
+availability, an off-chain encrypted message, a TLS upload to the seller's
+endpoint, etc. This keeps the cryptographic core orthogonal to delivery and
+lets the same protocol be reused across very different deployment
+environments (public chains, permissioned consortia, mixed on/off-chain
+flows). For the demo we instantiate the channel with a Node.js
+\texttt{EventEmitter} so that the script can be executed as a single-process
+trace, but the seller still cross-checks each reveal against the on-chain
+commitment via the \texttt{validReveals} filter, so an inconsistent reveal is
+rejected regardless of which channel was used.
+
+\item[Phase 3 -- Settle (zero-knowledge).]
+The seller declares the winner on-chain and additionally publishes two
+non-interactive zero-knowledge proofs that the winner can verify:
+\begin{itemize}[leftmargin=*,nosep]
+\item $\pi_{\max}$: the winner's commitment $c_{j^*}$ opens to a value
+$p_{j^*}$ such that $p_{j^*} \geq p_i$ for every $i \neq j^*$.
+\item $\pi_{\mathrm{mem}}$: the publicly announced second-price $p$ equals
+the opening of \emph{some} commitment in
+$\{c_i : i \neq j^*\}$, without revealing which one.
+\end{itemize}
+\end{description}
+
+\subsection{Cryptographic primitives}
+
+We work in the prime-order subgroup of \texttt{secp256k1} with generator $G$
+and order $q$. The package \texttt{@noble/curves/secp256k1} supplies fast,
+constant-time scalar arithmetic. We derive a second base point
+$H = \mathrm{HashToScalar}(\textsf{``internal-pedersen-generator-H''})\cdot G$
+whose discrete log relative to $G$ is unknown.
+
+\paragraph{Pedersen commitment.} A bid $p$ with blinding factor
+$n \xleftarrow{\$} \mathbb{Z}_q$ commits to
+$
+c \;=\; p\cdot G \;+\; n\cdot H.
+$
+
+\paragraph{Fiat--Shamir.} Every interactive $\Sigma$-protocol below is made
+non-interactive by replacing the verifier's challenge with
+$
+e \;=\; \mathrm{SHA{\text -}256}(\textsf{ctx} \,\|\, \textsf{transcript}) \bmod q,
+$
+where \textsf{ctx} is a domain-separation string instantiated with the
+deployed contract address. This binds proofs to a specific auction and
+prevents replay across auctions.
+
+\subsection{$\Sigma$-protocol building blocks}
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Schnorr discrete-log proof.} Proves knowledge of $w$ with
+$Y = w\cdot B$ for any base $B$. Three-move protocol with response
+$z = k + e\cdot w$.
+\item \textbf{OR-Schnorr.} Given a list of statements $Y_i = w_i\cdot B_i$ the
+prover proves knowledge of \emph{some} $w_j$ without revealing the index.
+Standard simulation trick: pick random challenges and responses for the
+$n-1$ false branches and force their sum to equal the Fiat--Shamir challenge.
+\item \textbf{Bit proof.} A commitment $C$ opens to $b\in\{0,1\}$ iff
+$
+C \;=\; r\cdot H \;\;\text{or}\;\; C - G \;=\; r\cdot H,
+$
+implemented as a 2-of-2 OR-Schnorr with bases $Y_0 = C$ and $Y_1 = C - G$
+relative to $H$.
+\item \textbf{Range proof $[0, 2^m)$.} Decompose $v = \sum_{i=0}^{m-1} 2^i b_i$,
+commit to each bit, prove each bit is 0/1, and reveal a linear-combination
+randomness check. Proof size is $\Theta(m)$.
+\end{enumerate}
+
+\subsection{Composite proofs that secure the auction}
+
+\paragraph{Proof of Maximum (\texttt{proveMaximum}).} Given commitments
+$c_1,\dots,c_n$ and the prover's index $j^*$, output a proof that
+$
+\forall\, i\neq j^*:\; p_{j^*} \geq p_i.
+$
+By the homomorphism of Pedersen, $D_i := c_{j^*} - c_i$ commits to
+$p_{j^*} - p_i$ with randomness $n_{j^*} - n_i$. Append a range proof on $D_i$
+in $[0, 2^m)$. The bit-length $m$ caps the legal bid range to $[0, 2^m)$,
+which (as we show below) is the cornerstone of one of our anti-fraud defences.
+
+\paragraph{Proof of Membership (\texttt{proveMembership}).} Given a public
+value $x$ and commitments $c_1,\dots,c_n$, prove that $x = p_{j^\dagger}$ for
+some $j^\dagger$ without revealing $j^\dagger$. Reduces to: ``some $c_i - x\cdot G$
+opens to $0\cdot G + n_i\cdot H$'', which is an OR-Schnorr with base $H$ over
+the $n$ candidate points.
+
+\paragraph{Putting them together.} For an auction with bidders
+$\{1,\dots,n\}$ and announced winner index $j^*$, the seller publishes
+$j^*$, $\pi_{\max}=\texttt{proveMaximum}(\dots,j^*)$, the second-price $p$,
+and $\pi_{\mathrm{mem}}=\texttt{proveMembership}(p,\{c_i\}_{i\neq j^*})$.
+The winner verifies (i) $j^* = \texttt{myIndex}$ -- this binds the proof to
+the on-chain winner -- (ii) $\pi_{\max}$, and (iii) $\pi_{\mathrm{mem}}$.
+
+\subsection{Smart contract}
+
+The on-chain logic is intentionally minimal:
+\begin{lstlisting}[language=solidity]
+contract VickreyAuction {
+    address public seller;
+    uint256 public commitDeadline;
+    bool    public finalized;
+    address public winner;
+    mapping(address => string) public commits; // hex-encoded curve point
+    address[] public bidders;
+
+    function commitBid(string calldata c) external; // before deadline
+    function finalize(address w) external;          // seller, once
+}
+\end{lstlisting}
+The contract is a public bulletin board for commitments and the single point
+of truth for the deadline and the winner identity.
+
+\textbf{Design choice: ZK-proof delivery and verification are intentionally
+left to the application layer.} Both $\pi_{\max}$ and $\pi_{\mathrm{mem}}$
+are produced by the seller and consumed by whoever needs to be convinced;
+in our demo that is the winner, who runs the verifier in JavaScript. The
+contract itself only exposes \texttt{commitBid} and \texttt{finalize} and
+deliberately stays out of the proof pipeline. This separation of concerns
+is valuable for two reasons. First, it lets each deployment pick its own
+verification surface: a single suspicious winner can verify locally; an
+entire ecosystem can publish the proofs to a watcher service; or, if global
+on-chain auditability is desired, the same proofs can be wrapped in a
+Groth16 circuit (we ship a generated \texttt{Groth16Verifier.sol}) and
+verified by a smart contract. Second, it keeps the on-chain footprint --
+and therefore gas cost -- minimal: a single $\pi_{\max}$ is on the order
+of kilobytes, and verifying \texttt{secp256k1} arithmetic in the EVM has
+no native precompile, so doing it directly on-chain would be prohibitively
+expensive. By exposing the proofs as plain data rather than baking the
+verifier in, the protocol stays gas-cheap by default while still enabling
+full on-chain verification when an application chooses to opt in.
+
+% =====================================================================
+\section{Threat Model and Defences}
+% =====================================================================
+
+\paragraph{Attack A: seller submits a price just below the highest bid.}
+\textbf{Defeated.} Bids are committed in Phase 1 only via hiding hash
+commitments. The seller does not learn the highest plaintext bid until Phase 2,
+\emph{after} their own commitment window has closed. There is no opportunity
+to insert a phantom bid that targets the genuine winner's value.
+
+\paragraph{Attack B: seller submits multiple decoy bids hoping one falls
+between the highest and second-highest.}
+\textbf{Defeated.} If the seller commits a value higher than the real maximum,
+they will be unable to produce $\pi_{\max}$ -- the auction simply fails to
+finalise. If the seller commits a value lower than the second-highest, that
+decoy is harmless. Either way, the seller cannot move the second price upward.
+
+\paragraph{Attack C: bidder lies on reveal.}
+\textbf{Defeated by an explicit cross-check} (\texttt{validReveals} filter
+in \texttt{sellerFlow}): the seller recomputes
+$\mathrm{commit}(p',n')$ for every reveal and discards mismatches. Without
+this filter, a single inconsistent reveal would crash $\pi_{\max}$ generation
+and freeze the auction (this was Bug \#4 in our development log).
+
+\paragraph{Attack D: seller swaps the on-chain winner for another address.}
+\textbf{Defeated by} the winner-side check $\texttt{proof.maxIndex} =
+\texttt{myIndex}$ (Bug \#2 in our log). $\pi_{\max}$ alone only binds
+$c_{j^*}$ to the maximum, not $j^*$ to the on-chain winner address.
+
+\paragraph{Attack E: replay across auctions.}
+\textbf{Defeated.} Every Fiat--Shamir challenge incorporates the deployed
+contract address as \textsf{ctx}, so a proof that verifies against auction $A$
+will not verify against auction $B$. Our test suite includes a
+``mismatched-ctx'' regression case for both composite proofs.
+
+\paragraph{Attack F: front-running the commit transaction.}
+\textbf{Mitigated.} Pedersen commitments are perfectly hiding, so observing
+the mempool reveals nothing about the bid value. The bidder need only submit
+\texttt{commitBid} before the deadline.
+
+\end{document}
